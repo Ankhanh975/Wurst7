@@ -9,13 +9,19 @@ package net.wurstclient.hacks;
 
 import java.util.ArrayList;
 import java.util.Comparator;
-import java.util.stream.Stream;
+import java.util.List;
+import java.util.stream.Collectors;
+import net.minecraft.entity.player.PlayerEntity;
+import net.minecraft.item.Item;
+import net.minecraft.item.ItemStack;
+import net.minecraft.item.Items;
+import net.minecraft.entity.EquipmentSlot;
 
 import net.minecraft.client.util.math.MatrixStack;
 import net.minecraft.entity.Entity;
-import net.minecraft.util.Hand;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
+import net.minecraft.text.Text;
 import net.wurstclient.Category;
 import net.wurstclient.SearchTags;
 import net.wurstclient.ai.PathFinder;
@@ -64,6 +70,9 @@ public final class FightBotHack extends Hack
 	private final EntityFilterList entityFilters =
 		EntityFilterList.genericCombat();
 	
+	private final CheckboxSetting debugSetting =
+		new CheckboxSetting("Debug", false);
+	
 	private EntityPathFinder pathFinder;
 	private PathProcessor processor;
 	private int ticksProcessing;
@@ -79,8 +88,73 @@ public final class FightBotHack extends Hack
 		addSetting(distance);
 		addSetting(useAi);
 		addSetting(pauseOnContainers);
+		addSetting(debugSetting);
 		
 		entityFilters.forEach(this::addSetting);
+	}
+	
+	private boolean hasDiamondGear(PlayerEntity player)
+	{
+		try
+		{
+			// check armor using equipment slots
+			ItemStack head = player.getEquippedStack(EquipmentSlot.HEAD);
+			ItemStack chest = player.getEquippedStack(EquipmentSlot.CHEST);
+			ItemStack legs = player.getEquippedStack(EquipmentSlot.LEGS);
+			ItemStack feet = player.getEquippedStack(EquipmentSlot.FEET);
+			
+			if((head != null && !head.isEmpty())
+				&& (head.getItem() == Items.DIAMOND_HELMET))
+				return true;
+			if((chest != null && !chest.isEmpty())
+				&& (chest.getItem() == Items.DIAMOND_CHESTPLATE))
+				return true;
+			if((legs != null && !legs.isEmpty())
+				&& (legs.getItem() == Items.DIAMOND_LEGGINGS))
+				return true;
+			if((feet != null && !feet.isEmpty())
+				&& (feet.getItem() == Items.DIAMOND_BOOTS))
+				return true;
+			
+			// check hands for diamond tools/weapons
+			ItemStack main = player.getMainHandStack();
+			ItemStack off = player.getOffHandStack();
+			Item m = main != null ? main.getItem() : null;
+			Item o = off != null ? off.getItem() : null;
+			if(m == Items.DIAMOND_SWORD || m == Items.DIAMOND_AXE
+				|| m == Items.DIAMOND_PICKAXE || m == Items.DIAMOND_SHOVEL
+				|| m == Items.DIAMOND_HOE)
+				return true;
+			if(o == Items.DIAMOND_SWORD || o == Items.DIAMOND_AXE
+				|| o == Items.DIAMOND_PICKAXE || o == Items.DIAMOND_SHOVEL
+				|| o == Items.DIAMOND_HOE)
+				return true;
+		}catch(Throwable t)
+		{
+			// be defensive in case the player entity implementation differs
+			return false;
+		}
+		
+		return false;
+	}
+	
+	private void chatDbg(String msg)
+	{
+		if(!debugSetting.isChecked())
+			return;
+		
+		try
+		{
+			if(MC.inGameHud != null && MC.inGameHud.getChatHud() != null)
+				MC.inGameHud.getChatHud()
+					.addMessage(Text.literal("[FightBot] " + msg));
+			else
+				System.out.println("[FightBot] " + msg);
+		}catch(Throwable t)
+		{
+			// fallback to stdout if anything goes wrong
+			System.out.println("[FightBot] " + msg);
+		}
 	}
 	
 	@Override
@@ -125,17 +199,85 @@ public final class FightBotHack extends Hack
 		
 		if(pauseOnContainers.shouldPause())
 			return;
-		
-		// set entity
-		Stream<Entity> stream = EntityUtils.getAttackableEntities();
-		stream = entityFilters.applyTo(stream);
-		
-		Entity entity = stream
-			.min(
-				Comparator.comparingDouble(e -> MC.player.squaredDistanceTo(e)))
-			.orElse(null);
-		if(entity == null)
+			
+		// if we're too far from the reference point (0,82,0), skip updates
+		// using squaredDistance so this compares squared units (25 = 5 blocks)
+		if(MC.player.squaredDistanceTo(0, 82, 0) > 25)
+		{
+			chatDbg(
+				"Player too far from origin (0,82,0), skipping update. dist="
+					+ String.format("%.2f",
+						Math.sqrt(MC.player.squaredDistanceTo(0, 82, 0))));
 			return;
+		}
+		
+		// set entity: repeatedly pick the nearest entity and validate it
+		List<Entity> entities =
+			entityFilters.applyTo(EntityUtils.getAttackableEntities())
+				.collect(Collectors.toList());
+		
+		chatDbg("Total attackable entities after filters: " + entities.size());
+		
+		Entity entity = null;
+		while(!entities.isEmpty())
+		{
+			// pick nearest
+			Entity candidate = entities.stream()
+				.min(Comparator
+					.comparingDouble(e -> MC.player.squaredDistanceTo(e)))
+				.orElse(null);
+			if(candidate == null)
+				break;
+			// remove candidate from list so we don't pick it again
+			entities.remove(candidate);
+			
+			// distance check first (only consider within 5 blocks / squared
+			// distance <= 25)
+			if(MC.player.squaredDistanceTo(candidate) > 25)
+			{
+				chatDbg("Skipping candidate (too far): "
+					+ String.format("%.2f", MC.player.distanceTo(candidate)));
+				continue;
+			}
+			
+			// must be a player
+			if(!(candidate instanceof PlayerEntity))
+			{
+				chatDbg("Skipping candidate (not a player): "
+					+ candidate.toString());
+				continue;
+			}
+			
+			// check diamond gear
+			if(hasDiamondGear((PlayerEntity)candidate))
+			{
+				chatDbg("Skipping candidate (has diamond gear): "
+					+ ((PlayerEntity)candidate).getName().getString());
+				continue;
+			}
+			
+			// passed all checks
+			entity = candidate;
+			break;
+		}
+		
+		if(entity == null)
+		{
+			// If we previously locked controls while using the AI path
+			// processor,
+			// make sure to release them when there's no target. Otherwise the
+			// client can keep receiving control/rotation updates and appear to
+			// spin around with no entities present.
+			
+			// PathProcessor.releaseControls();
+			// processor = null;
+			// // reset pathFinder base to the player so renderPath won't
+			// operate on
+			// // a stale target (optional, safe fallback).
+			// if (pathFinder == null)
+			// pathFinder = new EntityPathFinder(MC.player);
+			return;
+		}
 		
 		WURST.getHax().autoSwordHack.setSlot(entity);
 		
@@ -155,8 +297,8 @@ public final class FightBotHack extends Hack
 			if(!pathFinder.isDone() && !pathFinder.isFailed())
 			{
 				PathProcessor.lockControls();
-				WURST.getRotationFaker()
-					.faceVectorClient(entity.getBoundingBox().getCenter());
+				WURST.getRotationFaker().faceVectorClient(
+					entity.getBoundingBox().getCenter().add(0, 0, 0.7));
 				pathFinder.think();
 				pathFinder.formatPath();
 				processor = pathFinder.getProcessor();
@@ -199,8 +341,8 @@ public final class FightBotHack extends Hack
 			// follow entity
 			MC.options.forwardKey.setPressed(
 				MC.player.distanceTo(entity) > distance.getValueF());
-			WURST.getRotationFaker()
-				.faceVectorClient(entity.getBoundingBox().getCenter());
+			WURST.getRotationFaker().faceVectorClient(
+				entity.getBoundingBox().getCenter().add(0, 0, 0.7));
 		}
 		
 		// check cooldown
@@ -209,11 +351,15 @@ public final class FightBotHack extends Hack
 		
 		// check range
 		if(MC.player.squaredDistanceTo(entity) > Math.pow(range.getValue(), 2))
-			return;
-		
-		// attack entity
+		{
+			// If out of range, 1% chance to still attack (random fallback)
+			boolean fallback = Math.random() <= 0.01;
+			
+			if(!fallback)
+				return;
+		}
 		MC.interactionManager.attackEntity(MC.player, entity);
-		swingHand.swing(Hand.MAIN_HAND);
+		// swingHand.swing(Hand.MAIN_HAND);
 		speed.resetTimer();
 	}
 	
