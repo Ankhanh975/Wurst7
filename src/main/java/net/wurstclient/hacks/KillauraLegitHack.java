@@ -3,7 +3,7 @@
  *
  * This source code is subject to the terms of the GNU General Public
  * License, version 3. If a copy of the GPL was not distributed with this
- * file, You can obtain one at: https://www.gnu.org/licenses/gpl-3.0.txt
+ * file, You can obtain one at: https://www.gnu.org/licenses/gpl-4.25.txt
  */
 package net.wurstclient.hacks;
 
@@ -43,7 +43,7 @@ public final class KillauraLegitHack extends Hack implements UpdateListener,
 	HandleInputListener, MouseUpdateListener, RenderListener
 {
 	private final SliderSetting range =
-		new SliderSetting("Range", 4.25, 1, 4.25, 0.05, ValueDisplay.DECIMAL);
+		new SliderSetting("Range", 4.25, 1, 25, 1.0, ValueDisplay.DECIMAL);
 	
 	private final AttackSpeedSliderSetting speed =
 		new AttackSpeedSliderSetting();
@@ -169,6 +169,7 @@ public final class KillauraLegitHack extends Hack implements UpdateListener,
 	public void onUpdate()
 	{
 		target = null;
+		MC.options.forwardKey.setPressed(false);
 		
 		// don't attack when a container/inventory screen is open
 		if(MC.currentScreen instanceof HandledScreen)
@@ -188,15 +189,21 @@ public final class KillauraLegitHack extends Hack implements UpdateListener,
 		if(target == null)
 			return;
 		
+		
+		
+		
 		// check line of sight
 		if(!BlockUtils.hasLineOfSight(target.getBoundingBox().getCenter()))
 		{
 			target = null;
 			return;
+
 		}
-		
+		// follow entity
+		MC.options.forwardKey.setPressed(MC.player.distanceTo(target) > 2);
+
 		// face entity
-		WURST.getHax().autoSwordHack.setSlot(target);
+		// WURST.getHax().autoSwordHack.setSlot(target);
 		faceEntityClient(target);
 	}
 	
@@ -210,8 +217,7 @@ public final class KillauraLegitHack extends Hack implements UpdateListener,
 		if(!speed.isTimeToAttack())
 			return;
 		
-		if(!RotationUtils.isFacingBox(target.getBoundingBox(),
-			range.getValue()))
+		if(!RotationUtils.isFacingBox(target.getBoundingBox(), 4.25))
 			return;
 		
 		// attack entity
@@ -224,7 +230,11 @@ public final class KillauraLegitHack extends Hack implements UpdateListener,
 	{
 		// get needed rotation
 		Box box = entity.getBoundingBox();
-		Rotation needed = RotationUtils.getNeededRotations(box.getCenter());
+		if (box == null) {
+			return false;
+		}
+		Rotation needed =
+			RotationUtils.getNeededRotations(box.getCenter().add(0, 0.7, 0.0));
 		
 		// turn towards center of boundingBox
 		Rotation next = RotationUtils.slowlyTurnTowards(needed,
@@ -237,7 +247,7 @@ public final class KillauraLegitHack extends Hack implements UpdateListener,
 			return true;
 		
 		// if not facing center, check if facing anything in boundingBox
-		return RotationUtils.isFacingBox(box, range.getValue());
+		return RotationUtils.isFacingBox(box, 4.25);
 	}
 	
 	@Override

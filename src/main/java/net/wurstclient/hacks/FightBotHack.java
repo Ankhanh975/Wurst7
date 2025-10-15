@@ -16,9 +16,12 @@ import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.entity.EquipmentSlot;
-
+import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.util.math.MatrixStack;
 import net.minecraft.entity.Entity;
+import net.minecraft.util.Hand;
+import net.minecraft.util.hit.EntityHitResult;
+import net.minecraft.util.hit.HitResult;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.text.Text;
@@ -76,7 +79,8 @@ public final class FightBotHack extends Hack
 	private EntityPathFinder pathFinder;
 	private PathProcessor processor;
 	private int ticksProcessing;
-	
+	private static final MinecraftClient client = MinecraftClient.getInstance();
+
 	public FightBotHack()
 	{
 		super("FightBot");
@@ -201,23 +205,34 @@ public final class FightBotHack extends Hack
 			return;
 			
 		// if we're too far from the reference point (0,82,0), skip updates
-		// using squaredDistance so this compares squared units (25 = 5 blocks)
-		if(MC.player.squaredDistanceTo(0, 82, 0) > 25)
+		// using squaredDistance so this compares squared units (15*15 = 15
+		// blocks)
+		if(MC.player.getPos().y > 85 || MC.player.getPos().y < 80 || MC.player.squaredDistanceTo(0, 82, 0) > 15*15)
+		// if(MC.player.getPos().y > 50)
 		{
-			chatDbg(
-				"Player too far from origin (0,82,0), skipping update. dist="
-					+ String.format("%.2f",
-						Math.sqrt(MC.player.squaredDistanceTo(0, 82, 0))));
+			// chatDbg(
+			// "Player too far from origin (0,82,0), skipping update. dist="
+			// + String.format("%.2f",
+			// Math.sqrt(MC.player.squaredDistanceTo(0, 82, 0))));
+			MC.options.forwardKey.setPressed(false);
 			return;
 		}
 		
-		// set entity: repeatedly pick the nearest entity and validate it
+		// set entity: filter for PlayerEntity within 9 blocks
 		List<Entity> entities =
 			entityFilters.applyTo(EntityUtils.getAttackableEntities())
+				.filter(entity -> entity instanceof PlayerEntity)
+				.filter(entity -> MC.player.squaredDistanceTo(entity) <= 9 * 9)
 				.collect(Collectors.toList());
 		
-		chatDbg("Total attackable entities after filters: " + entities.size());
+		// return early if less than 10 players
+		if(entities.size() < 10){
+			return;
+		}
 		
+		// chatDbg("Total attackable entities after filters: " +
+		// entities.size());
+		//
 		Entity entity = null;
 		while(!entities.isEmpty())
 		{
@@ -231,28 +246,20 @@ public final class FightBotHack extends Hack
 			// remove candidate from list so we don't pick it again
 			entities.remove(candidate);
 			
-			// distance check first (only consider within 5 blocks / squared
-			// distance <= 25)
-			if(MC.player.squaredDistanceTo(candidate) > 25)
-			{
-				chatDbg("Skipping candidate (too far): "
-					+ String.format("%.2f", MC.player.distanceTo(candidate)));
-				continue;
-			}
-			
 			// must be a player
 			if(!(candidate instanceof PlayerEntity))
 			{
-				chatDbg("Skipping candidate (not a player): "
-					+ candidate.toString());
+				// chatDbg("Skipping candidate (not a player): "
+				// + candidate.toString());
 				continue;
 			}
 			
-			// check diamond gear
-			if(hasDiamondGear((PlayerEntity)candidate))
+			// check diamond gear only if the nearest player is within 6 blocks
+			if(MC.player.squaredDistanceTo((PlayerEntity)candidate) < 5*5
+				&& hasDiamondGear((PlayerEntity)candidate))
 			{
-				chatDbg("Skipping candidate (has diamond gear): "
-					+ ((PlayerEntity)candidate).getName().getString());
+				// chatDbg("Skipping candidate (has diamond gear): "
+				// + ((PlayerEntity)candidate).getName().getString());
 				continue;
 			}
 			
@@ -298,7 +305,7 @@ public final class FightBotHack extends Hack
 			{
 				PathProcessor.lockControls();
 				WURST.getRotationFaker().faceVectorClient(
-					entity.getBoundingBox().getCenter().add(0, 0, 0.7));
+					entity.getBoundingBox().getCenter().add(0, 0, 0.55));
 				pathFinder.think();
 				pathFinder.formatPath();
 				processor = pathFinder.getProcessor();
@@ -342,7 +349,7 @@ public final class FightBotHack extends Hack
 			MC.options.forwardKey.setPressed(
 				MC.player.distanceTo(entity) > distance.getValueF());
 			WURST.getRotationFaker().faceVectorClient(
-				entity.getBoundingBox().getCenter().add(0, 0, 0.7));
+				entity.getBoundingBox().getCenter().add(0, 0.55, 0.0));
 		}
 		
 		// check cooldown
@@ -353,14 +360,26 @@ public final class FightBotHack extends Hack
 		if(MC.player.squaredDistanceTo(entity) > Math.pow(range.getValue(), 2))
 		{
 			// If out of range, 1% chance to still attack (random fallback)
-			boolean fallback = Math.random() <= 0.01;
+			// boolean fallback = Math.random() <= 0.01;
 			
-			if(!fallback)
-				return;
+			// if (!fallback)
+			
+			return;
 		}
-		MC.interactionManager.attackEntity(MC.player, entity);
-		// swingHand.swing(Hand.MAIN_HAND);
-		speed.resetTimer();
+
+		HitResult hit = client.crosshairTarget;
+
+    	switch (hit.getType()) {
+			case ENTITY -> {
+				EntityHitResult entityHit = (EntityHitResult) hit;
+				client.interactionManager.attackEntity(client.player, entityHit.getEntity());
+				client.player.swingHand(Hand.MAIN_HAND);
+				speed.resetTimer();
+			}
+			default -> {
+				return;
+			}
+		}
 	}
 	
 	@Override
