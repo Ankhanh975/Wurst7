@@ -10,7 +10,6 @@ package net.wurstclient.hacks;
 import java.awt.Color;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Locale;
 import java.util.Optional;
 import java.util.function.Predicate;
 
@@ -138,8 +137,6 @@ public final class TrajectoriesHack extends Hack implements RenderListener
 		new ColorSetting("Block Hit Color",
 			"Color of the trajectory when it hits a block.", Color.GREEN);
 	
-	private String defaultImpactTime = "--";
-	
 	public TrajectoriesHack()
 	{
 		super("Trajectories");
@@ -165,7 +162,6 @@ public final class TrajectoriesHack extends Hack implements RenderListener
 	public void onRender(MatrixStack matrixStack, float partialTicks)
 	{
 		Trajectory defaultTrajectory = getTrajectory(partialTicks, 0);
-		updateImpactEstimate(defaultTrajectory);
 		
 		drawTrajectory(matrixStack, defaultTrajectory);
 	}
@@ -173,24 +169,7 @@ public final class TrajectoriesHack extends Hack implements RenderListener
 	@Override
 	public String getRenderName()
 	{
-		if(defaultImpactTime.equals("--"))
-			return "Trajectories";
-		
-		return "Trajectories [" + defaultImpactTime + "]";
-	}
-	
-	private void updateImpactEstimate(Trajectory defaultTrajectory)
-	{
-		defaultImpactTime = formatImpactTime(defaultTrajectory);
-	}
-	
-	private String formatImpactTime(Trajectory trajectory)
-	{
-		if(!trajectory.hasImpact())
-			return "--";
-		
-		return String.format(Locale.ROOT, "%.2fs",
-			trajectory.impactTimeSeconds());
+		return "Trajectories";
 	}
 	
 	private void drawTrajectory(MatrixStack matrixStack, Trajectory trajectory)
@@ -218,7 +197,6 @@ public final class TrajectoriesHack extends Hack implements RenderListener
 		
 		for(Box predictionBox : trajectory.predictedTargetBoxes())
 		{
-			RenderUtils.drawSolidBox(matrixStack, predictionBox, quadColor, false);
 			RenderUtils.drawOutlinedBox(matrixStack, predictionBox, lineColor,
 				false);
 		}
@@ -242,11 +220,7 @@ public final class TrajectoriesHack extends Hack implements RenderListener
 			BlockHitResult blockResult = BlockUtils.raycast(previousPoint,
 				loweredPoint, FluidHandling.NONE);
 			if(blockResult.getType() != HitResult.Type.MISS)
-			{
-				loweredPath.add(blockResult.getPos());
 				blocked = true;
-				break;
-			}
 			
 			loweredPath.add(loweredPoint);
 			previousPoint = loweredPoint;
@@ -419,7 +393,7 @@ public final class TrajectoriesHack extends Hack implements RenderListener
 		for(int i = 0; i < MAX_INTERCEPT_ITERATIONS; i++)
 		{
 			Vec3d aimedMotion = getAimedMotionToBox(startPos, targetBox,
-				launchSpeed);
+				launchSpeed, gravity);
 			double interceptTime = getProjectileInterceptTime(startPos,
 				aimedMotion, gravity, fluidHandling, targetBox);
 			if(interceptTime < 0)
@@ -438,13 +412,46 @@ public final class TrajectoriesHack extends Hack implements RenderListener
 	}
 	
 	private Vec3d getAimedMotionToBox(Vec3d startPos, Box targetBox,
-		double launchSpeed)
+		double launchSpeed, double gravity)
 	{
-		Vec3d toTarget = targetBox.getCenter().subtract(startPos);
-		if(toTarget.lengthSquared() == 0)
+		Vec3d targetCenter = targetBox.getCenter();
+		Vec3d toTarget = targetCenter.subtract(startPos);
+		double horizontalX = toTarget.x;
+		double horizontalZ = toTarget.z;
+		double horizontalDistance =
+			Math.sqrt(horizontalX * horizontalX + horizontalZ * horizontalZ);
+		double verticalDistance = toTarget.y;
+		
+		if(horizontalDistance < 1.0E-6)
 			return new Vec3d(0, 0, launchSpeed);
 		
-		return toTarget.normalize().multiply(launchSpeed);
+		double speedSquared = launchSpeed * launchSpeed;
+		double discriminant = speedSquared * speedSquared
+			- gravity * (gravity * horizontalDistance * horizontalDistance
+				+ 2 * verticalDistance * speedSquared);
+		
+		// No real ballistic solution (target out of reach for current speed).
+		if(discriminant < 0)
+			return toTarget.normalize().multiply(launchSpeed);
+		
+		double sqrtDiscriminant = Math.sqrt(discriminant);
+		double denominator = gravity * horizontalDistance;
+		if(Math.abs(denominator) < 1.0E-6)
+			return toTarget.normalize().multiply(launchSpeed);
+		
+		double tanThetaLow = (speedSquared - sqrtDiscriminant) / denominator;
+		double tanThetaHigh = (speedSquared + sqrtDiscriminant) / denominator;
+		double angleLow = Math.atan(tanThetaLow);
+		double angleHigh = Math.atan(tanThetaHigh);
+		double launchAngle =
+			Math.abs(angleLow) <= Math.abs(angleHigh) ? angleLow : angleHigh;
+		
+		double horizontalSpeed = launchSpeed * Math.cos(launchAngle);
+		double verticalSpeed = launchSpeed * Math.sin(launchAngle);
+		double horizontalScale = horizontalSpeed / horizontalDistance;
+		double motionX = horizontalX * horizontalScale;
+		double motionZ = horizontalZ * horizontalScale;
+		return new Vec3d(motionX, verticalSpeed, motionZ);
 	}
 	
 	private double getProjectileInterceptTime(Vec3d startPos, Vec3d startMotion,
@@ -455,11 +462,6 @@ public final class TrajectoriesHack extends Hack implements RenderListener
 		for(int i = 0; i < 1000; i++)
 		{
 			Vec3d nextPos = arrowPos.add(arrowMotion.multiply(0.1));
-			
-			BlockHitResult blockResult =
-				BlockUtils.raycast(arrowPos, nextPos, fluidHandling);
-			if(blockResult.getType() != HitResult.Type.MISS)
-				return -1;
 			
 			Optional<Vec3d> entityHit = targetBox.raycast(arrowPos, nextPos);
 			if(entityHit.isPresent())
