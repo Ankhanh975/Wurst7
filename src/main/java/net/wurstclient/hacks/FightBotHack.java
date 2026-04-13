@@ -207,22 +207,24 @@ public final class FightBotHack extends Hack
 		// if we're too far from the reference point (0,82,0), skip updates
 		// using squaredDistance so this compares squared units (15*15 = 15
 		// blocks)
-		if(MC.player.getPos().y > 85 || MC.player.getPos().y < 80 || MC.player.squaredDistanceTo(0, 82, 0) > 15*15)
+		if(MC.player.getPos().y > 85 || MC.player.getPos().y < 80 || MC.player.squaredDistanceTo(0, 83, 0) > 15*15)
 		// if(MC.player.getPos().y > 50)
 		{
 			// chatDbg(
 			// "Player too far from origin (0,82,0), skipping update. dist="
 			// + String.format("%.2f",
 			// Math.sqrt(MC.player.squaredDistanceTo(0, 82, 0))));
-			MC.options.forwardKey.setPressed(false);
+			if (MC.player.getPos().y < 85) {
+				MC.options.forwardKey.setPressed(false);
+			}
 			return;
 		}
 		
-		// set entity: filter for PlayerEntity within 9 blocks
+		// set entity: filter for PlayerEntity within 25 blocks
 		List<Entity> entities =
 			entityFilters.applyTo(EntityUtils.getAttackableEntities())
 				.filter(entity -> entity instanceof PlayerEntity)
-				.filter(entity -> MC.player.squaredDistanceTo(entity) <= 9 * 9)
+				.filter(entity -> MC.player.squaredDistanceTo(entity) <= 25 * 25)
 				.collect(Collectors.toList());
 		
 		// return early if less than 10 players
@@ -347,7 +349,7 @@ public final class FightBotHack extends Hack
 			
 			// follow entity
 			MC.options.forwardKey.setPressed(
-				MC.player.distanceTo(entity) > distance.getValueF());
+				MC.player.distanceTo(entity) > distance.getValueF() && MC.player.distanceTo(entity) < 10.0);
 			WURST.getRotationFaker().faceVectorClient(
 				entity.getBoundingBox().getCenter().add(0, 0.55, 0.0));
 		}

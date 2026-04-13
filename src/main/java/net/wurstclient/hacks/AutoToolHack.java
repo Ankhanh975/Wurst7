@@ -135,6 +135,9 @@ public final class AutoToolHack extends Hack
 		if(player.getAbilities().creativeMode)
 			return;
 		
+		if(player.getMainHandStack().isIn(ItemTags.SWORDS))
+			return;
+		
 		ItemStack heldItem = player.getMainHandStack();
 		boolean heldItemDamageable = isDamageable(heldItem);
 		if(heldItemDamageable && isTooDamaged(heldItem, repairMode))
