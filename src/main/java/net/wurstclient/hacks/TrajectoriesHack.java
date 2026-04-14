@@ -57,7 +57,10 @@ public final class TrajectoriesHack extends Hack implements RenderListener
 	 *   - Gravity subtracts gravity * 0.1 from Y velocity each step.
 	 * - Collision checks are done in this order for each segment:
 	 *   - Block collision via BlockUtils.raycast(...).
-	 *   - Entity collision via ProjectileUtil.raycast(...).
+	 *   - Entity collision against predicted future boxes.
+	 *   - Entity collision against current/actual boxes.
+	 *   - If both entity checks hit on the same segment, the actual-box hit is
+	 *     prioritized and used as the impact point.
 	 * - On first collision:
 	 *   - The current path point is replaced with the exact impact coordinate.
 	 *   - The loop stops immediately.
@@ -67,8 +70,8 @@ public final class TrajectoriesHack extends Hack implements RenderListener
 	 * 3) Lowered companion path behavior
 	 * - The lowered path is generated from the main path points with yOffset=-1.5.
 	 * - Each lowered segment is raycasted against blocks using FluidHandling.NONE.
-	 * - If a lowered segment hits a block, the hit coordinate is appended and the
-	 *   lowered path is truncated there.
+	 * - If any lowered segment hits a block, the lowered path is marked as blocked,
+	 *   but the full lowered path still renders.
 	 * - Lowered-path color is independent from main-path collision type:
 	 *   - If lowered path hits a block: use entityHitColor (red).
 	 *   - If lowered path does not hit: use blockHitColor (green).
@@ -85,7 +88,8 @@ public final class TrajectoriesHack extends Hack implements RenderListener
 	 *     direction (implemented as +/-60 degrees via XZ-plane dot product).
 	 *
 	 * 5) Future box model per entity
-	 * - Base future-box extrapolation uses the entity's current velocity and an
+	 * - Base future-box extrapolation uses velocity estimated from per-tick
+	 *   position deltas (current position - previous tick position) and an
 	 *   estimated time horizon.
 	 * - The resulting box preserves the entity's current Y extents (minY/maxY), so
 	 *   prediction is horizontal-only in practice even if velocity includes Y.
@@ -99,10 +103,11 @@ public final class TrajectoriesHack extends Hack implements RenderListener
 	 *   c) Compute projectile intercept time against that box by simulating the
 	 *      projectile and raycasting segment-vs-box along the path.
 	 *   d) Rebuild the future box with the new intercept time.
-	 *   e) Repeat until |newTime - oldTime| < INTERCEPT_TIME_EPSILON or until
+	 *   e) Repeat until the center distance between successive predicted boxes is
+	 *      below INTERCEPT_DISTANCE_EPSILON or until
 	 *      MAX_INTERCEPT_ITERATIONS is reached.
-	 * - If a blocking block collision occurs before intercepting the target box,
-	 *   the solver rejects that prediction for the entity.
+	 * - Intercept-time solving intentionally does not cancel on block collisions,
+	 *   so future prediction boxes still render even when blocks are in the way.
 	 *
 	 * 7) Why this structure exists
 	 * - Earlier versions could produce different-looking hit vs miss prediction
@@ -111,7 +116,8 @@ public final class TrajectoriesHack extends Hack implements RenderListener
 	 *   between flight time and the target's predicted location.
 	 *
 	 * 8) Practical limitations (expected)
-	 * - Entity motion is still predicted from current velocity only; sudden
+	 * - Entity motion is still predicted from short-term position deltas only;
+	 *   sudden
 	 *   acceleration, jumps, knockback, AI turns, and server corrections can cause
 	 *   visual deviation.
 	 * - The projectile model is step-based, so results are approximation quality,
@@ -121,7 +127,7 @@ public final class TrajectoriesHack extends Hack implements RenderListener
 	private static final double SIMULATION_STEP_SECONDS = 0.005;
 	private static final double MAX_PREDICTION_RANGE_SQUARED = 64 * 64;
 	private static final int MAX_INTERCEPT_ITERATIONS = 6;
-	private static final double INTERCEPT_TIME_EPSILON = 0.002;
+	private static final double INTERCEPT_DISTANCE_EPSILON = 0.05;
 	private static final double VIEW_CONE_HALF_ANGLE_DEGREES = 60;
 	private static final double VIEW_CONE_COSINE = Math.cos(Math.toRadians(
 		VIEW_CONE_HALF_ANGLE_DEGREES));
@@ -133,9 +139,18 @@ public final class TrajectoriesHack extends Hack implements RenderListener
 		new ColorSetting("Entity Hit Color",
 			"Color of the trajectory when it hits an entity.", Color.RED);
 	
+	private final ColorSetting actualEntityHitColor =
+		new ColorSetting("Actual Entity Hit Color",
+			"Color of the trajectory when it hits an actual entity bounding box.",
+			Color.ORANGE);
+	
 	private final ColorSetting blockHitColor =
 		new ColorSetting("Block Hit Color",
 			"Color of the trajectory when it hits a block.", Color.GREEN);
+	
+	private final ColorSetting predictionColor =
+		new ColorSetting("Prediction Color",
+			"Color of future movement prediction boxes.", Color.CYAN);
 	
 	public TrajectoriesHack()
 	{
@@ -143,7 +158,9 @@ public final class TrajectoriesHack extends Hack implements RenderListener
 		setCategory(Category.RENDER);
 		addSetting(missColor);
 		addSetting(entityHitColor);
+		addSetting(actualEntityHitColor);
 		addSetting(blockHitColor);
+		addSetting(predictionColor);
 	}
 	
 	@Override
@@ -180,6 +197,7 @@ public final class TrajectoriesHack extends Hack implements RenderListener
 		ColorSetting color = getColor(trajectory);
 		int lineColor = color.getColorI(0xC0);
 		int quadColor = color.getColorI(0x40);
+		int predictionLineColor = predictionColor.getColorI(0xC0);
 		
 		Box endBox = trajectory.getEndBox();
 		ArrayList<Vec3d> path = trajectory.path();
@@ -189,15 +207,17 @@ public final class TrajectoriesHack extends Hack implements RenderListener
 		RenderUtils.drawOutlinedBox(matrixStack, endBox, lineColor, false);
 		RenderUtils.drawCurvedLine(matrixStack, path, lineColor, false);
 		
-		ColorSetting loweredColor = loweredPath.blocked() ? entityHitColor
-			: blockHitColor;
-		int loweredLineColor = loweredColor.getColorI(0xC0);
+		Color loweredBaseColor = loweredPath.blocked() ? Color.LIGHT_GRAY
+			: Color.GRAY;
+		int loweredLineColor = (0xC0 << 24)
+			| (loweredBaseColor.getRGB() & 0xFFFFFF);
 		RenderUtils.drawCurvedLine(matrixStack, loweredPath.path(),
 			loweredLineColor, false);
 		
 		for(Box predictionBox : trajectory.predictedTargetBoxes())
 		{
-			RenderUtils.drawOutlinedBox(matrixStack, predictionBox, lineColor,
+			RenderUtils.drawOutlinedBox(matrixStack, predictionBox,
+				predictionLineColor,
 				false);
 		}
 	}
@@ -233,7 +253,7 @@ public final class TrajectoriesHack extends Hack implements RenderListener
 	{
 		ClientPlayerEntity player = MC.player;
 		ArrayList<Vec3d> path = new ArrayList<>();
-		HitResult.Type type = HitResult.Type.MISS;
+		PathHitType type = PathHitType.MISS;
 		double impactTimeSeconds = -1;
 		ArrayList<Box> predictedTargetBoxes = new ArrayList<>();
 		
@@ -299,24 +319,36 @@ public final class TrajectoriesHack extends Hack implements RenderListener
 			if(bResult.getType() != HitResult.Type.MISS)
 			{
 				// Replace last pos with the collision point
-				type = HitResult.Type.BLOCK;
+				type = PathHitType.BLOCK;
 				impactTimeSeconds = (i + 1) * SIMULATION_STEP_SECONDS;
 				path.set(path.size() - 1, bResult.getPos());
 				break;
 			}
 			
-			// Check for entity collision
-			Box box = new Box(lastPos, arrowPos);
-			Predicate<Entity> predicate = e -> !e.isSpectator() && e.canHit();
-			double maxDistSq = 64 * 64;
-			EntityHitResult eResult = ProjectileUtil.raycast(player, lastPos,
-				arrowPos, box, predicate, maxDistSq);
-			if(eResult != null && eResult.getType() != HitResult.Type.MISS)
+			// Check for entity collision using predicted future boxes.
+			PredictedEntityHit eResult =
+				getPredictedBoxEntityHit(player, lastPos, arrowPos,
+					predictionTimeSeconds);
+			
+			// Also check against current (actual) entity boxes.
+			EntityHitResult actualResult =
+				getActualBoxEntityHit(player, lastPos, arrowPos);
+			if(actualResult != null
+				&& actualResult.getType() != HitResult.Type.MISS)
 			{
 				// Replace last pos with the collision point
-				type = HitResult.Type.ENTITY;
+				type = PathHitType.ENTITY_ACTUAL;
 				impactTimeSeconds = (i + 1) * SIMULATION_STEP_SECONDS;
-				path.set(path.size() - 1, eResult.getPos());
+				path.set(path.size() - 1, actualResult.getPos());
+				break;
+			}
+			
+			if(eResult != null)
+			{
+				// Replace last pos with the collision point
+				type = PathHitType.ENTITY_PREDICTED;
+				impactTimeSeconds = (i + 1) * SIMULATION_STEP_SECONDS;
+				path.set(path.size() - 1, eResult.pos());
 				break;
 			}
 		}
@@ -338,11 +370,20 @@ public final class TrajectoriesHack extends Hack implements RenderListener
 		Box currentBox = entity.getBoundingBox();
 		double impactTimeTicks = impactTimeSeconds / SIMULATION_STEP_SECONDS
 			* SIMULATION_STEP_TICKS;
-		Vec3d velocity = entity.getVelocity();
+		Vec3d velocity = getEstimatedVelocityFromDeltas(entity);
 		Vec3d predictedOffset = velocity.multiply(impactTimeTicks);
 		Box predictedBox = currentBox.offset(predictedOffset);
 		return new Box(predictedBox.minX, currentBox.minY, predictedBox.minZ,
 			predictedBox.maxX, currentBox.maxY, predictedBox.maxZ);
+	}
+	
+	private Vec3d getEstimatedVelocityFromDeltas(Entity entity)
+	{
+		// Estimate per-tick velocity from server-observable position deltas.
+		double deltaX = entity.getX() - entity.lastRenderX;
+		double deltaY = entity.getY() - entity.lastRenderY;
+		double deltaZ = entity.getZ() - entity.lastRenderZ;
+		return new Vec3d(deltaX, deltaY, deltaZ);
 	}
 	
 	private ArrayList<Box> getProjectedTargetBoxes(ClientPlayerEntity player,
@@ -378,6 +419,53 @@ public final class TrajectoriesHack extends Hack implements RenderListener
 		return boxes;
 	}
 	
+	private PredictedEntityHit getPredictedBoxEntityHit(
+		ClientPlayerEntity player,
+		Vec3d start, Vec3d end, double predictionTimeSeconds)
+	{
+		if(MC.world == null)
+			return null;
+		
+		PredictedEntityHit bestHit = null;
+		double bestDistSq = Double.MAX_VALUE;
+		for(Entity entity : MC.world.getEntities())
+		{
+			if(entity == null || entity == player || !entity.canHit()
+				|| entity.isSpectator())
+				continue;
+			
+			Box predictedBox = getProjectedTargetBox(entity, predictionTimeSeconds);
+			if(predictedBox == null)
+				continue;
+			
+			Optional<Vec3d> hitPos = predictedBox.raycast(start, end);
+			if(hitPos.isEmpty())
+				continue;
+			
+			double distSq = start.squaredDistanceTo(hitPos.get());
+			if(distSq < bestDistSq)
+			{
+				bestDistSq = distSq;
+				bestHit = new PredictedEntityHit(entity, hitPos.get());
+			}
+		}
+		
+		return bestHit;
+	}
+	
+	private EntityHitResult getActualBoxEntityHit(ClientPlayerEntity player,
+		Vec3d start, Vec3d end)
+	{
+		if(MC.world == null)
+			return null;
+		
+		Box rayBox = new Box(start, end);
+		Predicate<Entity> predicate = e -> e != player && !e.isSpectator()
+			&& e.canHit();
+		return ProjectileUtil.raycast(player, start, end, rayBox, predicate,
+			MAX_PREDICTION_RANGE_SQUARED);
+	}
+	
 	private Box getConsistentPredictedTargetBox(Entity entity, Vec3d startPos,
 		Vec3d startMotion, double gravity, FluidHandling fluidHandling,
 		double initialTimeGuess)
@@ -388,7 +476,7 @@ public final class TrajectoriesHack extends Hack implements RenderListener
 			return null;
 		double launchSpeed = startMotion.length();
 		if(launchSpeed <= 0)
-			return null;
+			return targetBox;
 		
 		for(int i = 0; i < MAX_INTERCEPT_ITERATIONS; i++)
 		{
@@ -397,15 +485,20 @@ public final class TrajectoriesHack extends Hack implements RenderListener
 			double interceptTime = getProjectileInterceptTime(startPos,
 				aimedMotion, gravity, fluidHandling, targetBox);
 			if(interceptTime < 0)
-				return null;
-			
-			if(Math.abs(interceptTime - timeSeconds) < INTERCEPT_TIME_EPSILON)
 				return targetBox;
 			
+			Box nextTargetBox = getProjectedTargetBox(entity, interceptTime);
+			if(nextTargetBox == null)
+				return getProjectedTargetBox(entity, initialTimeGuess);
+			
+			double centerDistanceSq = nextTargetBox.getCenter()
+				.squaredDistanceTo(targetBox.getCenter());
+			if(centerDistanceSq
+				<= INTERCEPT_DISTANCE_EPSILON * INTERCEPT_DISTANCE_EPSILON)
+				return nextTargetBox;
+			
 			timeSeconds = interceptTime;
-			targetBox = getProjectedTargetBox(entity, timeSeconds);
-			if(targetBox == null)
-				return null;
+			targetBox = nextTargetBox;
 		}
 		
 		return targetBox;
@@ -581,12 +674,13 @@ public final class TrajectoriesHack extends Hack implements RenderListener
 		return switch(trajectory.type())
 		{
 			case MISS -> missColor;
-			case ENTITY -> entityHitColor;
+			case ENTITY_PREDICTED -> entityHitColor;
+			case ENTITY_ACTUAL -> actualEntityHitColor;
 			case BLOCK -> blockHitColor;
 		};
 	}
 	
-	private record Trajectory(ArrayList<Vec3d> path, HitResult.Type type,
+	private record Trajectory(ArrayList<Vec3d> path, PathHitType type,
 		double impactTimeSeconds, ArrayList<Box> predictedTargetBoxes)
 	{
 		public boolean isEmpty()
@@ -596,7 +690,7 @@ public final class TrajectoriesHack extends Hack implements RenderListener
 		
 		public boolean hasImpact()
 		{
-			return type != HitResult.Type.MISS;
+			return type != PathHitType.MISS;
 		}
 		
 		public Box getEndBox()
@@ -607,6 +701,18 @@ public final class TrajectoriesHack extends Hack implements RenderListener
 	}
 	
 	private record LoweredPath(ArrayList<Vec3d> path, boolean blocked)
+	{
+	}
+	
+	private enum PathHitType
+	{
+		MISS,
+		BLOCK,
+		ENTITY_PREDICTED,
+		ENTITY_ACTUAL
+	}
+	
+	private record PredictedEntityHit(Entity entity, Vec3d pos)
 	{
 	}
 }
