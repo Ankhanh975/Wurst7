@@ -9,7 +9,9 @@ package net.wurstclient.hacks;
 
 import java.awt.Color;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.function.Predicate;
 
@@ -125,6 +127,9 @@ public final class TrajectoriesHack extends Hack implements RenderListener
 	 */
 	private static final double SIMULATION_STEP_TICKS = 0.1;
 	private static final double SIMULATION_STEP_SECONDS = 0.005;
+	// 0.05s of player falling at 20 TPS is about 1 tick of gravity (0.08).
+	private static final double PLAYER_JUMP_SPEED = 0.42 - 0.08;
+	private static final int VELOCITY_AVERAGE_WINDOW = 5;
 	private static final double MAX_PREDICTION_RANGE_SQUARED = 64 * 64;
 	private static final int MAX_INTERCEPT_ITERATIONS = 6;
 	private static final double INTERCEPT_DISTANCE_EPSILON = 0.05;
@@ -151,6 +156,8 @@ public final class TrajectoriesHack extends Hack implements RenderListener
 	private final ColorSetting predictionColor =
 		new ColorSetting("Prediction Color",
 			"Color of future movement prediction boxes.", Color.CYAN);
+	
+	private final Map<Integer, MotionSample> motionSamples = new HashMap<>();
 	
 	public TrajectoriesHack()
 	{
@@ -287,12 +294,19 @@ public final class TrajectoriesHack extends Hack implements RenderListener
 		Vec3d arrowPos = EntityUtils.getLerpedPos(player, partialTicks)
 			.add(getHandOffset(hand, yaw)).add(0, yOffset, 0);
 		
+		// Combine launch vector with upward jump vector (vector composition).
+		double jumpSpeedBoost = player.getVelocity().y > 0 ? PLAYER_JUMP_SPEED : 0;
+		Vec3d baseArrowMotion = getStartingMotion(yaw, pitch, throwPower);
+		Vec3d basePredictionMotion = item instanceof BowItem
+			? getStartingMotion(yaw, pitch, 3.0)
+			: baseArrowMotion;
+		
 		// Calculate starting motion
-		Vec3d arrowMotion = getStartingMotion(yaw, pitch, throwPower);
+		Vec3d arrowMotion =
+			composeLaunchWithJump(baseArrowMotion, jumpSpeedBoost);
 		Vec3d initialArrowPos = arrowPos;
-		Vec3d predictionArrowMotion = arrowMotion;
-		if(item instanceof BowItem)
-			predictionArrowMotion = getStartingMotion(yaw, pitch, 3.0);
+		Vec3d predictionArrowMotion =
+			composeLaunchWithJump(basePredictionMotion, jumpSpeedBoost);
 		
 		// Build the path
 		for(int i = 0; i < 1000; i++)
@@ -379,11 +393,38 @@ public final class TrajectoriesHack extends Hack implements RenderListener
 	
 	private Vec3d getEstimatedVelocityFromDeltas(Entity entity)
 	{
-		// Estimate per-tick velocity from server-observable position deltas.
-		double deltaX = entity.getX() - entity.lastRenderX;
-		double deltaY = entity.getY() - entity.lastRenderY;
-		double deltaZ = entity.getZ() - entity.lastRenderZ;
-		return new Vec3d(deltaX, deltaY, deltaZ);
+		// Update only when entity age changes (once per game tick) so render FPS
+		// doesn't collapse velocity toward zero.
+		int entityId = entity.getId();
+		Vec3d currentPos = entity.getPos();
+		MotionSample sample = motionSamples.get(entityId);
+		if(sample == null)
+		{
+			motionSamples.put(entityId,
+				new MotionSample(currentPos, entity.age, Vec3d.ZERO,
+					new ArrayList<>()));
+			return Vec3d.ZERO;
+		}
+		
+		if(entity.age <= sample.age())
+			return sample.velocity();
+		
+		int ticksPassed = entity.age - sample.age();
+		Vec3d delta = currentPos.subtract(sample.pos());
+		Vec3d rawVelocity = delta.multiply(1.0 / ticksPassed);
+		
+		ArrayList<Vec3d> readings = new ArrayList<>(sample.recentVelocities());
+		readings.add(rawVelocity);
+		if(readings.size() > VELOCITY_AVERAGE_WINDOW)
+			readings.remove(0);
+		
+		Vec3d velocity = Vec3d.ZERO;
+		for(Vec3d reading : readings)
+			velocity = velocity.add(reading);
+		velocity = velocity.multiply(1.0 / readings.size());
+		motionSamples.put(entityId,
+			new MotionSample(currentPos, entity.age, velocity, readings));
+		return velocity;
 	}
 	
 	private ArrayList<Box> getProjectedTargetBoxes(ClientPlayerEntity player,
@@ -536,8 +577,16 @@ public final class TrajectoriesHack extends Hack implements RenderListener
 		double tanThetaHigh = (speedSquared + sqrtDiscriminant) / denominator;
 		double angleLow = Math.atan(tanThetaLow);
 		double angleHigh = Math.atan(tanThetaHigh);
-		double launchAngle =
-			Math.abs(angleLow) <= Math.abs(angleHigh) ? angleLow : angleHigh;
+
+		double cosLow = Math.cos(angleLow);
+		double cosHigh = Math.cos(angleHigh);
+		double timeLow = cosLow > 1.0E-6
+			? horizontalDistance / (launchSpeed * cosLow)
+			: Double.POSITIVE_INFINITY;
+		double timeHigh = cosHigh > 1.0E-6
+			? horizontalDistance / (launchSpeed * cosHigh)
+			: Double.POSITIVE_INFINITY;
+		double launchAngle = timeLow <= timeHigh ? angleLow : angleHigh;
 		
 		double horizontalSpeed = launchSpeed * Math.cos(launchAngle);
 		double verticalSpeed = launchSpeed * Math.sin(launchAngle);
@@ -669,6 +718,22 @@ public final class TrajectoriesHack extends Hack implements RenderListener
 			.multiply(throwPower);
 	}
 	
+	private Vec3d composeLaunchWithJump(Vec3d launchMotion,
+		double jumpSpeedBoost)
+	{
+		if(jumpSpeedBoost <= 0)
+			return launchMotion;
+		
+		Vec3d combined = launchMotion.add(0, jumpSpeedBoost, 0);
+		double newPower = combined.length();
+		if(newPower == 0)
+			return combined;
+		
+		// Rebuild from normalized direction and new power to make it explicit
+		// that both direction and magnitude changed after vector addition.
+		return combined.normalize().multiply(newPower);
+	}
+	
 	private ColorSetting getColor(Trajectory trajectory)
 	{
 		return switch(trajectory.type())
@@ -713,6 +778,11 @@ public final class TrajectoriesHack extends Hack implements RenderListener
 	}
 	
 	private record PredictedEntityHit(Entity entity, Vec3d pos)
+	{
+	}
+	
+	private record MotionSample(Vec3d pos, int age, Vec3d velocity,
+		ArrayList<Vec3d> recentVelocities)
 	{
 	}
 }
